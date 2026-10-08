@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building a Customer Support Agent with RAG: Evaluation First, Autonomy Last</title>
+<meta name="description" content="What I learned building a production-minded support agent: measure every change, let code decide money, and treat failures as state.">
+<meta property="og:title" content="Building a Customer Support Agent with RAG: Evaluation First, Autonomy Last">
+<meta property="og:description" content="What I learned building a production-minded support agent: measure every change, let code decide money, and treat failures as state.">
+<meta property="og:type" content="article">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #fbfbf9;
+    --surface: #ffffff;
+    --text: #1d1f23;
+    --muted: #5d636e;
+    --border: #e4e4df;
+    --accent: #2f5bd3;
+    --code-bg: #f2f2ee;
+    --table-head: #f4f4f0;
+    --quote: #eef2fc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14161a;
+      --surface: #1b1e23;
+      --text: #e6e7ea;
+      --muted: #a0a6b1;
+      --border: #2d3139;
+      --accent: #8fb0ff;
+      --code-bg: #20242b;
+      --table-head: #22262d;
+      --quote: #1d2433;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14161a;
+    --surface: #1b1e23;
+    --text: #e6e7ea;
+    --muted: #a0a6b1;
+    --border: #2d3139;
+    --accent: #8fb0ff;
+    --code-bg: #20242b;
+    --table-head: #22262d;
+    --quote: #1d2433;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 17px/1.7 "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 56px 16px 96px; }
+  header.post { margin-bottom: 40px; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+  header.post h1 { font-size: clamp(1.8rem, 4.5vw, 2.5rem); line-height: 1.2; margin: 0 0 12px; letter-spacing: -0.02em; }
+  header.post .meta { color: var(--muted); font-size: 0.95rem; }
+  h2 { font-size: 1.55rem; line-height: 1.3; margin: 56px 0 16px; letter-spacing: -0.01em; }
+  h3 { font-size: 1.2rem; margin: 36px 0 12px; }
+  p, ul, ol { margin: 0 0 18px; }
+  li { margin: 6px 0; }
+  li > ul, li > ol { margin: 6px 0 0; }
+  a { color: var(--accent); text-underline-offset: 3px; }
+  strong { font-weight: 600; }
+  code {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.86em;
+    background: var(--code-bg);
+    padding: 0.12em 0.36em;
+    border-radius: 4px;
+    overflow-wrap: anywhere;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    overflow-x: auto;
+    margin: 0 0 22px;
+  }
+  pre code { background: none; padding: 0; font-size: 0.82rem; line-height: 1.6; overflow-wrap: normal; }
+  .table-wrap { overflow-x: auto; margin: 0 0 24px; border: 1px solid var(--border); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.92rem; background: var(--surface); }
+  th, td { text-align: left; vertical-align: top; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  th { background: var(--table-head); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  figure.diagram {
+    margin: 8px 0 28px;
+    padding: 20px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow-x: auto;
+    text-align: center;
+  }
+  figure.diagram pre.mermaid { background: none; border: none; padding: 0; margin: 0; }
+  /* Before Mermaid renders (or if it can't), keep the source readable. */
+  pre.mermaid:not([data-processed]) { text-align: left; color: var(--muted); font-size: 0.8rem; white-space: pre; }
+  footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <article>
+    <header class="post">
+      <h1>Building a Customer Support Agent with RAG: Evaluation First, Autonomy Last</h1>
+      <div class="meta"><time datetime="2026-10-08">2026-10-08</time></div>
+    </header>
+<p>Most "RAG chatbot" tutorials stop at <em>retrieve, stuff the prompt, generate</em>. Real customer
+support doesn't stop there. Some questions need documentation, some need business rules
+that move money, and some need a person. This post walks through how I designed one: a
+measured RAG service, wrapped as one node of a LangGraph agent. I focus on the decisions
+that turned out to matter, and the bugs that only showed up in live runs.</p>
+<p>Code: <a href="https://github.com/lynnhuang1234/RAG_take_home">github.com/lynnhuang1234/RAG_take_home</a></p>
+<h2>1. The problem</h2>
+<p>The setting is a campus food-ordering and smart pickup-locker service. Customers write in
+with three kinds of messages:</p>
+<ul>
+<li><strong>"How do I…?"</strong>: how to order, how pickup codes work, what to do when a locker won't
+  open. The answer is in a 67-entry FAQ.</li>
+<li><strong>"Where is my food?"</strong>: a late order. The right response depends on the order's
+  timings: chase it, add a small coupon, or refund it.</li>
+<li><strong>"I want my money back."</strong>: a refund request. Same inputs, a different rule table, and
+  a question of who is responsible: the merchant, the delivery team or the platform.</li>
+</ul>
+<p>The starting point was an existing MVP: one FastAPI file with a fine-tuned intent
+classifier, hard-coded refund and coupon rules, a similarity-threshold FAQ lookup, an
+in-memory chat history, and a cron job that filed a work order after two minutes of
+silence. It worked as a demo. It also promised refunds with no human check, lost every
+conversation on restart, and its FAQ answers had never been measured.</p>
+<p>A pure RAG chatbot solves only the first kind of message. A pure "LLM agent with tools"
+lets a model decide who gets money. Neither is acceptable, so the design has two layers:</p>
+<figure class="diagram"><pre class="mermaid">flowchart LR
+    U([Customer]) --&gt; A[Agent: LangGraph workflow]
+    A --&gt;|how-to questions| R[RAG service]
+    A --&gt;|late order / refund| P[Deterministic rules]
+    P --&gt; H{{Operator approval}}
+    H --&gt; B[(Back office: coupons, refunds, work orders)]
+    A --&gt;|unclear or failed| Q[Human queue]
+</pre></figure>
+<h2>2. Requirements</h2>
+<p>I wrote these down before any code, because each one rules out a tempting shortcut.</p>
+<p><strong>Functional</strong></p>
+<ul>
+<li>Answer documentation questions with citations, and admit when the docs don't cover it.</li>
+<li>Apply the reminder, refund and responsibility rules exactly as specified.</li>
+<li>Hand off to a human when the order can't be found, the intent stays unclear, or
+  something fails.</li>
+<li>Support many conversations per customer, surviving restarts.</li>
+</ul>
+<p><strong>Non-functional</strong></p>
+<ul>
+<li><strong>Money is never decided by a model.</strong> Coupons and refunds follow fixed rules and wait
+  for an operator's approval.</li>
+<li><strong>Every quality change is measured</strong> before it ships.</li>
+<li><strong>Failures are recoverable</strong>: a timeout must not lose a work order or issue a coupon twice.</li>
+<li><strong>Auditable</strong>: for any reply, you can see which rule fired and why.</li>
+<li><strong>Privacy</strong>: phone numbers are personal data, so they're hashed in traces and in long-term
+  memory.</li>
+</ul>
+<p><strong>Non-goals</strong> (just as important): real back-office integration (a mock keeps the old API
+contract), multi-language support, and letting the model take any action beyond read-only
+lookups.</p>
+<h2>3. Evaluation comes first</h2>
+<p>The single most useful decision in the project was treating every quality change as an
+experiment with a rule fixed in advance. Here's what that looked like and what it caught.</p>
+<h3>3.1 Build an eval set that can't leak</h3>
+<p>My first retrieval numbers looked great, and they were wrong. The best chunking strategy
+embeds each FAQ entry's question with its answer, and I was evaluating with those same
+questions. The retriever was matching queries against themselves.</p>
+<p>The fix was a frozen, held-out set of <strong>201 paraphrased queries</strong> (several per FAQ entry),
+generated once and never regenerated. Two consequences:</p>
+<ul>
+<li>Paraphrases of the same entry are correlated, so confidence intervals use a
+  <strong>bootstrap that resamples by source entry</strong>, not by query. Resampling queries treats
+  near-duplicates as independent evidence and makes intervals too narrow.</li>
+<li>Results on the old query set and the new one are never compared directly.</li>
+</ul>
+<h3>3.2 Pick metrics that don't move with the thing you're changing</h3>
+<p>Hit rate and recall@k sound natural, but they're computed per chunk, so changing the chunk
+size changes what they measure. For chunking work I used <strong>answer coverage@k</strong>, the
+fraction of the gold answer's characters present in the top k. I paired it with
+<strong>context characters@k</strong> as the cost side. A strategy that "wins" by stuffing more text
+into the prompt shows up immediately.</p>
+<p>For generation, an LLM judge scores <strong>faithfulness</strong> (it extracts claims from the answer
+and checks each against the retrieved context) and <strong>answer relevance</strong> (a 1–5 rubric).</p>
+<h3>3.3 Check the judge before trusting it</h3>
+<p>An LLM judge is a model too. I had a second model label the same 40 calibration items with
+the same protocol:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Judgment</th>
+<th>Agreement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Claim supported</td>
+<td>Cohen's κ 0.77</td>
+</tr>
+<tr>
+<td>Relevance (1–5)</td>
+<td>quadratic-weighted κ 0.86, 100% within one point</td>
+</tr>
+</tbody>
+</table></div>
+<p>This shows the numbers don't hinge on one model's quirks. It does <strong>not</strong> show the judge
+agrees with people. That still needs human labels, and I say so wherever these numbers
+appear. Being explicit about what a validation does and doesn't prove is half its value.</p>
+<h3>3.4 Fix the ship rule before running anything</h3>
+<p>Each experiment had a primary metric, guardrail metrics and a small fixed set of
+candidates, all written down first. A change ships only if the primary metric's 95%
+interval excludes zero and no guardrail significantly regresses. Most ideas failed:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Change</th>
+<th>Outcome</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Index each FAQ question with its answer, return the full answer</td>
+<td><strong>Shipped.</strong> Coverage@5 0.375 → 0.654; relevance 0.753 → 0.819</td>
+</tr>
+<tr>
+<td>Hybrid retrieval (BM25 + dense)</td>
+<td>Rejected. Coverage@5 0.654 → 0.575: keywords help exact matches and hurt paraphrases</td>
+</tr>
+<tr>
+<td>Cross-encoder reranker</td>
+<td>Rejected. Quality change not significant; +394 ms to +3.3 s p95 latency on CPU</td>
+</tr>
+<tr>
+<td>Citations</td>
+<td><strong>Shipped.</strong> 92% of answers cite, 0% invalid citations, no quality change</td>
+</tr>
+<tr>
+<td>Remove "contact a human agent" boilerplate from the prompt</td>
+<td>Shipped by product decision: faithfulness 0.828 → 0.983, but relevance −0.049, because answers the model declines now dead-end</td>
+</tr>
+<tr>
+<td>Query rewriting for vague follow-ups</td>
+<td>Not shipped. It fixed a retrieval blind spot (4/11 → 11/11 on contact-info questions) but added ~1.7 s per turn</td>
+</tr>
+</tbody>
+</table></div>
+<p>The table is worth more than any single result. Two popular techniques (hybrid search and
+reranking) didn't pay off <em>on this data</em>. Without a pre-registered rule, it's easy to talk
+yourself into shipping them anyway.</p>
+<p>Cost discipline helped too. Eval runs use the Message Batches API (half price) and a
+response cache keyed by the exact request. The unchanged "before" side of an experiment is
+free to re-run, and an interrupted batch re-attaches instead of paying twice.</p>
+<h3>3.5 Evaluating the agent: different questions</h3>
+<p>The agent's rules are deterministic, so the first layer is plain testing: one test per
+graph branch, including boundaries (49/50/60/61/90/91 minutes), every responsibility
+combination, approval approve/reject, restarts, and crash recovery.</p>
+<p>Tests prove the rules are wired correctly. <strong>They didn't find the most important bugs.</strong>
+Live end-to-end runs against the real model did, and each cost a few cents. I'll come back
+to those bugs below; the lesson is to budget for live runs, not just CI.</p>
+<p>The open gap is a conversation-level eval: scripted multi-turn conversations scored on the
+final work order (right coupon, refund, responsibility and handoff?) plus a judge on reply
+quality. Unit tests can't replace it.</p>
+<h2>4. A workflow, not an autonomous agent</h2>
+<p>The biggest architecture decision: the agent is a <strong>LangGraph state machine where every
+business rule is a conditional edge</strong>, not a ReAct loop where the model chooses tools.</p>
+<figure class="diagram"><pre class="mermaid">flowchart TD
+    S([message]) --&gt; C{order confirmed?}
+    C --&gt;|no| Q[ask: is this about your latest order?]
+    C --&gt;|yes| I{intent}
+    I --&gt;|unclear twice| HO[human handoff]
+    I --&gt;|how-to| K[RAG answer]
+    I --&gt;|late / refund| F[re-fetch order] --&gt; D{minutes since order}
+    D --&gt;|under 50| CH[chase]
+    D --&gt;|50–60| C2[chase, 2-yuan coupon if upset]
+    D --&gt;|60–90| C3[coupon or refund]
+    D --&gt;|over 90| RF[refund + 10-yuan coupon] --&gt; R[assign responsibility]
+</pre></figure>
+<p>Routers are pure functions of the state; nodes do work but never choose the next branch.
+That buys three things that matter in support:</p>
+<ul>
+<li><strong>Auditability.</strong> Every turn's trace shows the path taken: <code>refund → over_90 →
+  refund_approve_coupon10 → delivery team responsible</code>.</li>
+<li><strong>Testability.</strong> Each branch is a test with no model in the loop.</li>
+<li><strong>Predictable cost and latency.</strong> The LLM is called for exactly three jobs: classify
+  intent when a small model isn't confident, answer documentation questions, and phrase
+  the reply.</li>
+</ul>
+<p>The intent step is a cascade: a small fine-tuned classifier, then an LLM if confidence is
+low, then one clarifying question, then a human. (The small model's training run is still
+pending, so today the LLM tier handles every turn: ~1–2 s and a fraction of a cent.) Asking before guessing is cheap; a wrong guess
+on a refund isn't.</p>
+<p>When would I let a model choose tools? Only for read-only lookups (say, "has a rider
+picked up my order?") from an allow-list, scoped to the current customer. I built that
+path but left it <strong>off</strong> until an experiment shows it beats plain RAG. The next section
+shows why that caution was justified.</p>
+<h2>5. Let the model phrase; let code decide</h2>
+<p>Two live bugs shaped this rule more than any design principle.</p>
+<p><strong>Bug 1: the model dropped the money.</strong> The rules had decided a refund plus a 10-yuan
+coupon. The customer's message asked when the food would arrive. The model answered the
+timing question and never mentioned the refund or the coupon. Prompting harder isn't a
+fix. The fix is that the <strong>application appends a fixed sentence</strong> whenever a turn
+moves money ("We've submitted a refund request and a 10-yuan coupon for you"). The model
+writes the empathy; the code writes the commitment.</p>
+<p><strong>Bug 2: the model un-promised the money.</strong> With read-only tool calling turned on, a
+customer asked an unrelated question about the locker. The model looked up the order and
+helpfully "corrected" an earlier reply: <em>"Correction: no coupon was issued."</em> The coupon had
+just been submitted for approval. That contradicts a business commitment, and no unit test
+would have caught it. The fix has two parts:</p>
+<ol>
+<li>The tool model's prompt forbids revisiting earlier replies or mentioning money.</li>
+<li>A deterministic guardrail discards any tool-model answer that mentions refunds or
+   coupons and falls back to the plain RAG answer.</li>
+</ol>
+<p>Prompts reduce how often this happens; only the guardrail stops it.</p>
+<p>Everything else follows the same principle:</p>
+<ul>
+<li><strong>Money waits for a person.</strong> The graph pauses on LangGraph's <code>interrupt()</code> and resumes
+  when an operator approves. The customer is told the request was <em>submitted</em>, not <em>done</em>.</li>
+<li><strong>Tools run through a manifest</strong>, enforced by one executor rather than by convention. Each
+  tool declares its risk, whether it needs approval, whether it's safe to retry, and
+  whether the model may see it. A money tool without approval refuses to run, and
+  only read tools can be model-visible. A new tool can't skip the checks because it
+  can't be registered without a manifest entry.</li>
+</ul>
+<pre><code class="language-python">MANIFEST = {
+    &quot;order_status&quot;:  ToolManifest(&quot;read&quot;,  requires_approval=False, idempotent=True, retries=2, model_visible=True),
+    &quot;issue_coupon&quot;:  ToolManifest(&quot;money&quot;, requires_approval=True,  idempotent=True, retries=2),
+    &quot;submit_refund&quot;: ToolManifest(&quot;money&quot;, requires_approval=True,  idempotent=True, retries=2),
+}
+</code></pre>
+<h2>6. Memory: facts are fetched, never remembered</h2>
+<p>"Agent memory" often means "store everything and retrieve it later". In support that's
+dangerous, because business facts go stale. The order the customer confirmed at minute 40
+is a different case at minute 95. So the rule is:</p>
+<ul>
+<li><strong>Short-term memory</strong> is the checkpointed conversation state. The order is <strong>re-fetched
+  just before every rule decision</strong>. If the latest order has changed (the customer placed a
+  new one), the conversation goes to a human instead of deciding on the wrong order. Long
+  conversations fold older turns into a rolling summary, which never carries money
+  decisions. Those live in the work order.</li>
+<li><strong>Each consumer gets its own view.</strong> The small classifier sees only the latest message;
+  the LLM classifier sees it with two earlier messages as context; the reply model sees the
+  summary plus recent turns. An earlier version fed the last three messages to the
+  classifier, so an earlier "refund me" outvoted a new how-to question and the customer was
+  told "I don't have permission to help with that." Again, found in a live run.</li>
+<li><strong>Long-term memory</strong> is a small per-customer profile: refunds and coupons <em>actually
+  applied</em>, past handoffs, and a few short notes ("locker at dorm 3 often fails"). It's
+  keyed by a keyed hash of the phone, expires after 180 days, can be deleted on request, and
+  is written after the conversation ends, never on the request path. Its most valuable use
+  isn't personalisation: <strong>approvers see "2 compensations in the last 30 days"</strong> when deciding
+  on a third. The notes come from customer text, so they're a prompt-injection surface: they
+  are bounded, fenced and labelled as background, and the rules and tools never see them.</li>
+</ul>
+<h2>7. Failures are state, not log lines</h2>
+<p>The MVP's failure handling was <code>logger.warning(...)</code>. A work order that failed to file was
+simply gone. The production version treats every failure as something recorded in the
+conversation state and repaired:</p>
+<ul>
+<li><strong>Idempotency keys on every write.</strong> A coupon call that times out <em>after</em> the back office
+  applied it is retried with the same key, and the back office applies each key once. No
+  double coupons.</li>
+<li><strong>An outbox for money.</strong> After approval, the intended actions are written to the
+  checkpointed state <em>before</em> any of them runs. If the process dies between the coupon and
+  the refund, a background job resumes the run from the checkpoint. The keys make re-running
+  the coupon a no-op. (This is a test: crash after the coupon, resume, assert exactly one
+  coupon.)</li>
+<li><strong>Partial failure goes to a person with specifics.</strong> If the refund fails after retries
+  but the coupon succeeded, the human gets <code>failed_actions: ["submit_refund"]</code>, not
+  "something went wrong".</li>
+<li><strong>A background job refiles</strong> work orders the back office rejected, with an attempt limit
+  and a metric to alert on when it gives up.</li>
+</ul>
+<p>Underneath sits the usual LLM resilience: retries with jitter, a circuit breaker, a server-side
+fallback model for refusals, and <code>503 + Retry-After</code> instead of a thread sleeping through a
+long rate-limit wait.</p>
+<h2>8. What I'd do next</h2>
+<ul>
+<li><strong>A conversation-level eval</strong> for the agent (above). It's the biggest gap.</li>
+<li><strong>The tool-calling experiment</strong>: tool model vs plain RAG on how-to and order-status
+  questions, judged on relevance and faithfulness to tool results, with latency and cost
+  as guardrails.</li>
+<li><strong>Authenticated identity.</strong> Today the API trusts the phone number in the request, so the
+  customer API key must stay on a trusted backend. The fix is a signed user token.</li>
+<li><strong>Human calibration</strong> of the LLM judge, plus Postgres-backed state for horizontal scaling.</li>
+</ul>
+<h2>Takeaways</h2>
+<ol>
+<li><strong>Evaluation is the product.</strong> Most ideas, including popular ones, didn't survive a
+   pre-registered rule. Leakage-free eval sets and the right metric matter more than the
+   retriever.</li>
+<li><strong>Use a workflow where the business has rules.</strong> Save autonomy for read-only lookups,
+   and ship that only after it's measured.</li>
+<li><strong>Let the model phrase; let code decide.</strong> Commitments to customers (money, promises)
+   come from the application, and a guardrail beats a stronger prompt.</li>
+<li><strong>Facts are fetched, never remembered.</strong> Memory should hold what happened, not what
+   is.</li>
+<li><strong>Live runs find the real bugs.</strong> All three serious bugs in this project (a lost refund,
+   a contradicted coupon, a misclassified question) passed unit tests and were caught for a
+   few cents of API calls.</li>
+</ol>
+  </article>
+  <footer>Thanks for reading.</footer>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+  const dark = document.documentElement.dataset.theme === "dark" ||
+    (document.documentElement.dataset.theme !== "light" &&
+     window.matchMedia("(prefers-color-scheme: dark)").matches);
+  mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral", securityLevel: "strict" });
+</script>
+</body>
+</html>
